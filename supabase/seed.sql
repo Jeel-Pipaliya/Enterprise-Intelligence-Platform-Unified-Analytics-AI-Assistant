@@ -1,0 +1,1 @@
+-- Supabase seed data SQL
