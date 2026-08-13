@@ -26,6 +26,15 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false))
   }, [token])
 
+  useEffect(() => {
+    const handleExpired = () => {
+      setToken(null)
+      setUser(null)
+    }
+    window.addEventListener('eip-auth-expired', handleExpired)
+    return () => window.removeEventListener('eip-auth-expired', handleExpired)
+  }, [])
+
   const login = async (email, password) => {
     const res = await api.post('/auth/login', { email, password })
     const { access_token, user: userData } = res.data

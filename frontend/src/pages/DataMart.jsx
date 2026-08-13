@@ -6,6 +6,51 @@ import { useAuth } from '../context/AuthContext'
 
 const COLORS = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4']
 
+function formatCurrency(value) {
+  return `$${Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+}
+
+function NaturalLanguageResult({ result }) {
+  const data = Array.isArray(result?.data) ? result.data.slice(0, 6) : []
+  if (!result) return null
+
+  return (
+    <div className="mt-3 text-sm">
+      <p className="font-medium text-slate-700 dark:text-slate-200">{result.interpretation}</p>
+      {data.length > 0 ? (
+        <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 dark:bg-slate-800">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold text-slate-600 dark:text-slate-300">Name</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-600 dark:text-slate-300">Category</th>
+                <th className="px-3 py-2 text-right font-semibold text-slate-600 dark:text-slate-300">Revenue</th>
+                <th className="px-3 py-2 text-right font-semibold text-slate-600 dark:text-slate-300">Units</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.map((row, index) => (
+                <tr key={row.id || row.name || row.category || index} className="border-t border-slate-100 dark:border-slate-700">
+                  <td className="px-3 py-2 font-medium text-slate-800 dark:text-slate-100">{row.name || row.category || row.date || row.segment}</td>
+                  <td className="px-3 py-2 text-slate-500 dark:text-slate-400">{row.category || row.segment || '-'}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-emerald-600 dark:text-emerald-400">
+                    {formatCurrency(row.revenue_generated ?? row.revenue ?? row.total_revenue)}
+                  </td>
+                  <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">
+                    {(row.units_sold ?? row.customer_count ?? '').toLocaleString?.() || '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">No matching data found.</p>
+      )}
+    </div>
+  )
+}
+
 export default function DataMart() {
   const { user } = useAuth()
   const [kpis, setKpis] = useState(null)
@@ -116,14 +161,7 @@ export default function DataMart() {
             />
             <button className="btn-primary text-sm" onClick={runNlQuery}>Ask</button>
           </div>
-          {nlResult && (
-            <div className="mt-3 text-sm">
-              <p className="font-medium text-slate-700 dark:text-slate-200">{nlResult.interpretation}</p>
-              <pre className="mt-2 text-xs bg-slate-50 dark:bg-slate-800 p-2 rounded overflow-x-auto max-h-40">
-                {JSON.stringify(nlResult.data?.slice?.(0, 5) ?? nlResult.data, null, 2)}
-              </pre>
-            </div>
-          )}
+          <NaturalLanguageResult result={nlResult} />
         </div>
 
         {(user?.role === 'analyst' || user?.role === 'admin') && (

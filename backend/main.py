@@ -6,17 +6,22 @@ from jose import JWTError, jwt
 import csv
 import hashlib
 import io
+import json
 import math
 import os
 import random
+import urllib.error
+import urllib.request
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
 # Configuration
 SECRET_KEY = "your-secret-key-change-in-production"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES") or "1440")
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-20b:free"
 
 def load_env_file() -> None:
     env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -219,6 +224,9 @@ def one(query: str, params: dict | None = None):
 def execute(query: str, params: dict | None = None):
     with engine.begin() as conn:
         return conn.execute(text(query), params or {})
+
+def message_sources(message: dict):
+    return json.dumps(message.get("sources") or message.get("tool_result") or [], default=str)
 
 def current_user_from_header(authorization: str | None):
     if not authorization or not authorization.startswith("Bearer "):
@@ -583,18 +591,29 @@ async def datamart_nl_query(payload: QueryRequest):
         return {"interpretation": "Customer segments by completed spend.", "chart_type": "table", "data": await datamart_segments()}
     if "category" in q or "breakdown" in q:
         return {"interpretation": "Revenue by product category.", "chart_type": "bar", "data": await datamart_category_breakdown()}
+    category = None
+    for known in rows("SELECT DISTINCT category FROM products WHERE is_active = TRUE ORDER BY category"):
+        if (known.get("category") or "").lower() in q:
+            category = known["category"]
+            break
+    where_clause = "WHERE p.is_active = TRUE"
+    params = {}
+    if category:
+        where_clause += " AND p.category = :category"
+        params["category"] = category
     data = rows("""
         SELECT p.id, p.name, p.category,
                COALESCE(SUM(t.total_amount) FILTER (WHERE t.status = 'completed'), 0) AS revenue_generated,
                COALESCE(SUM(t.quantity) FILTER (WHERE t.status = 'completed'), 0) AS units_sold
         FROM products p
         LEFT JOIN transactions t ON t.product_id = p.id
-        WHERE p.is_active = TRUE
+        {where_clause}
         GROUP BY p.id
         ORDER BY revenue_generated DESC
         LIMIT 10
-    """)
-    return {"interpretation": "Top products by completed revenue.", "chart_type": "bar", "data": [{**r, "id": str(r["id"]), "revenue_generated": to_float(r["revenue_generated"])} for r in data]}
+    """.format(where_clause=where_clause), params)
+    title = f"Top products in {category} by completed revenue." if category else "Top products by completed revenue."
+    return {"interpretation": title, "chart_type": "bar", "data": [{**r, "id": str(r["id"]), "revenue_generated": to_float(r["revenue_generated"]), "units_sold": int(r["units_sold"] or 0)} for r in data]}
 
 @app.post("/datamart/upload")
 async def datamart_upload(file: UploadFile = File(...)):
@@ -711,12 +730,12 @@ async def create_conversation(payload: ConversationPayload, authorization: str =
     for message in payload.messages:
         execute("""
             INSERT INTO chat_messages (session_id, role, content, tool_result)
-            VALUES (:session_id, :role, :content, :tool_result)
+            VALUES (:session_id, :role, :content, CAST(:tool_result AS JSONB))
         """, {
             "session_id": session_id,
             "role": message.get("role", "user"),
             "content": message.get("content", ""),
-            "tool_result": None,
+            "tool_result": message_sources(message),
         })
     return {"id": session_id, "title": result["title"]}
 
@@ -745,55 +764,484 @@ async def update_conversation(conversation_id: str, payload: ConversationPayload
     for message in payload.messages:
         execute("""
             INSERT INTO chat_messages (session_id, role, content, tool_result)
-            VALUES (:session_id, :role, :content, :tool_result)
+            VALUES (:session_id, :role, :content, CAST(:tool_result AS JSONB))
         """, {
             "session_id": conversation_id,
             "role": message.get("role", "user"),
             "content": message.get("content", ""),
-            "tool_result": None,
+            "tool_result": message_sources(message),
         })
     return {"id": conversation_id, "title": payload.title}
 
+def json_safe(value):
+    return json.loads(json.dumps(value, default=str))
+
+def search_products_tool(query=None, category=None, max_price=None, min_price=None, limit=10):
+    conditions = ["is_active = TRUE"]
+    params = {"limit": min(max(int(limit or 10), 1), 20)}
+    if query:
+        conditions.append("(name ILIKE :query OR description ILIKE :query OR brand ILIKE :query OR sku ILIKE :query)")
+        params["query"] = f"%{query}%"
+    if category:
+        conditions.append("category ILIKE :category")
+        params["category"] = f"%{category}%"
+    if max_price is not None:
+        conditions.append("price <= :max_price")
+        params["max_price"] = float(max_price)
+    if min_price is not None:
+        conditions.append("price >= :min_price")
+        params["min_price"] = float(min_price)
+
+    data = rows(f"""
+        SELECT id, name, sku, category, description, price, inventory_count, brand, rating
+        FROM products
+        WHERE {' AND '.join(conditions)}
+        ORDER BY COALESCE(rating, 0) DESC, inventory_count DESC, price ASC
+        LIMIT :limit
+    """, params)
+    return json_safe([{**item, "id": str(item["id"]), "price": to_float(item["price"])} for item in data])
+
+def get_product_tool(product_id=None, sku=None):
+    if not product_id and not sku:
+        return {"error": "product_id or sku is required"}
+    if product_id:
+        product = one("""
+            SELECT id, name, sku, category, description, price, inventory_count, brand, image_url,
+                   specifications, tags, rating, is_active
+            FROM products
+            WHERE id = :product_id
+        """, {"product_id": product_id})
+    else:
+        product = one("""
+            SELECT id, name, sku, category, description, price, inventory_count, brand, image_url,
+                   specifications, tags, rating, is_active
+            FROM products
+            WHERE sku = :sku
+        """, {"sku": sku})
+    if not product:
+        return {"error": "Product not found"}
+    return json_safe({**product, "id": str(product["id"]), "price": to_float(product["price"])})
+
+def check_inventory_tool(product_id=None, sku=None):
+    product = get_product_tool(product_id=product_id, sku=sku)
+    if product.get("error"):
+        return product
+    return {
+        "id": product["id"],
+        "name": product["name"],
+        "sku": product["sku"],
+        "inventory_count": product["inventory_count"],
+        "in_stock": product["inventory_count"] > 0,
+    }
+
+def get_active_cart(user_id: int):
+    cart = one("SELECT id, status FROM carts WHERE user_id = :user_id AND status = 'active' ORDER BY created_at DESC LIMIT 1", {"user_id": user_id})
+    if cart:
+        return cart
+    created = execute("""
+        INSERT INTO carts (user_id, status)
+        VALUES (:user_id, 'active')
+        RETURNING id, status
+    """, {"user_id": user_id}).mappings().first()
+    return dict(created)
+
+def get_cart_tool(user_id: int):
+    cart = get_active_cart(user_id)
+    items = rows("""
+        SELECT ci.id, ci.product_id, p.name, p.sku, p.category, ci.quantity, ci.unit_price,
+               (ci.quantity * ci.unit_price) AS line_total
+        FROM cart_items ci
+        JOIN products p ON p.id = ci.product_id
+        WHERE ci.cart_id = :cart_id
+        ORDER BY ci.created_at
+    """, {"cart_id": cart["id"]})
+    total = sum(to_float(item["line_total"]) for item in items)
+    return json_safe({
+        "cart_id": str(cart["id"]),
+        "items": [{**item, "id": str(item["id"]), "product_id": str(item["product_id"]), "unit_price": to_float(item["unit_price"]), "line_total": to_float(item["line_total"])} for item in items],
+        "total": total,
+    })
+
+def add_to_cart_tool(user_id: int, product_id=None, sku=None, quantity=1):
+    product = get_product_tool(product_id=product_id, sku=sku)
+    if product.get("error"):
+        return product
+    quantity = max(int(quantity or 1), 1)
+    if product["inventory_count"] < quantity:
+        return {"error": "Insufficient inventory", "available": product["inventory_count"], "product": product}
+    cart = get_active_cart(user_id)
+    execute("""
+        INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
+        VALUES (:cart_id, :product_id, :quantity, :unit_price)
+        ON CONFLICT (cart_id, product_id)
+        DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
+                      unit_price = EXCLUDED.unit_price
+    """, {
+        "cart_id": cart["id"],
+        "product_id": product["id"],
+        "quantity": quantity,
+        "unit_price": product["price"],
+    })
+    return get_cart_tool(user_id)
+
+def remove_from_cart_tool(user_id: int, product_id=None, sku=None):
+    product = get_product_tool(product_id=product_id, sku=sku)
+    if product.get("error"):
+        return product
+    cart = get_active_cart(user_id)
+    execute("DELETE FROM cart_items WHERE cart_id = :cart_id AND product_id = :product_id", {"cart_id": cart["id"], "product_id": product["id"]})
+    return get_cart_tool(user_id)
+
+def get_sales_summary_tool():
+    kpis = one("""
+        SELECT COUNT(*) AS total_orders,
+               COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) AS total_revenue,
+               COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) AS avg_order_value
+        FROM transactions
+    """) or {}
+    return json_safe({
+        "total_orders": int(kpis.get("total_orders") or 0),
+        "total_revenue": to_float(kpis.get("total_revenue")),
+        "avg_order_value": to_float(kpis.get("avg_order_value")),
+    })
+
+def get_top_products_tool(limit=5):
+    data = rows("""
+        SELECT p.id, p.name, p.category, p.brand,
+               COALESCE(SUM(t.quantity) FILTER (WHERE t.status = 'completed'), 0) AS units_sold,
+               COALESCE(SUM(t.total_amount) FILTER (WHERE t.status = 'completed'), 0) AS revenue
+        FROM products p
+        LEFT JOIN transactions t ON t.product_id = p.id
+        WHERE p.is_active = TRUE
+        GROUP BY p.id
+        ORDER BY revenue DESC, units_sold DESC
+        LIMIT :limit
+    """, {"limit": min(max(int(limit or 5), 1), 20)})
+    return json_safe([{**item, "id": str(item["id"]), "revenue": to_float(item["revenue"]), "units_sold": int(item["units_sold"] or 0)} for item in data])
+
+def get_regional_sales_tool():
+    data = rows("""
+        SELECT COALESCE(region, 'Unknown') AS region,
+               COUNT(*) AS transaction_count,
+               COALESCE(SUM(quantity), 0) AS units_sold,
+               COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) AS revenue
+        FROM transactions
+        GROUP BY region
+        ORDER BY revenue DESC
+    """)
+    return json_safe([{**item, "transaction_count": int(item["transaction_count"] or 0), "units_sold": int(item["units_sold"] or 0), "revenue": to_float(item["revenue"])} for item in data])
+
+def get_backtest_results_tool(ticker=None, limit=5):
+    params = {"limit": min(max(int(limit or 5), 1), 20)}
+    where = ""
+    if ticker:
+        where = "WHERE ticker = :ticker"
+        params["ticker"] = ticker.upper()
+    data = rows(f"""
+        SELECT id, strategy_name, ticker, start_date, end_date, initial_capital,
+               final_capital, total_return, sharpe_ratio, max_drawdown, volatility,
+               win_rate, total_trades, created_at
+        FROM backtests
+        {where}
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """, params)
+    return json_safe([{**item, "id": str(item["id"])} for item in data])
+
+def get_strategy_performance_tool(strategy_name=None):
+    params = {}
+    where = ""
+    if strategy_name:
+        where = "WHERE strategy_name ILIKE :strategy_name"
+        params["strategy_name"] = f"%{strategy_name}%"
+    data = rows(f"""
+        SELECT strategy_name,
+               COUNT(*) AS runs,
+               AVG(total_return) AS avg_return,
+               AVG(sharpe_ratio) AS avg_sharpe,
+               AVG(max_drawdown) AS avg_max_drawdown
+        FROM backtests
+        {where}
+        GROUP BY strategy_name
+        ORDER BY avg_sharpe DESC NULLS LAST
+    """, params)
+    return json_safe([{**item, "runs": int(item["runs"] or 0), "avg_return": to_float(item["avg_return"]), "avg_sharpe": to_float(item["avg_sharpe"]), "avg_max_drawdown": to_float(item["avg_max_drawdown"])} for item in data])
+
+ASSISTANT_TOOLS = [
+    {
+        "type": "function",
+        "name": "search_products",
+        "description": "Search active products by text, category, and price filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": ["string", "null"]},
+                "category": {"type": ["string", "null"]},
+                "max_price": {"type": ["number", "null"]},
+                "min_price": {"type": ["number", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["query", "category", "max_price", "min_price", "limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_product",
+        "description": "Get one product by product_id or sku.",
+        "parameters": {
+            "type": "object",
+            "properties": {"product_id": {"type": ["string", "null"]}, "sku": {"type": ["string", "null"]}},
+            "required": ["product_id", "sku"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "check_inventory",
+        "description": "Check whether a product is in stock.",
+        "parameters": {
+            "type": "object",
+            "properties": {"product_id": {"type": ["string", "null"]}, "sku": {"type": ["string", "null"]}},
+            "required": ["product_id", "sku"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "add_to_cart",
+        "description": "Add a product to the current user's active cart.",
+        "parameters": {
+            "type": "object",
+            "properties": {"product_id": {"type": ["string", "null"]}, "sku": {"type": ["string", "null"]}, "quantity": {"type": "integer", "minimum": 1}},
+            "required": ["product_id", "sku", "quantity"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "remove_from_cart",
+        "description": "Remove a product from the current user's active cart.",
+        "parameters": {
+            "type": "object",
+            "properties": {"product_id": {"type": ["string", "null"]}, "sku": {"type": ["string", "null"]}},
+            "required": ["product_id", "sku"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {"type": "function", "name": "get_cart", "description": "Get the current user's active cart.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "get_sales_summary", "description": "Get overall sales KPIs.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "get_top_products", "description": "Get top products by completed revenue.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["limit"], "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "get_regional_sales", "description": "Get sales by region.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "get_backtest_results", "description": "Get stored backtest results, optionally filtered by ticker.", "parameters": {"type": "object", "properties": {"ticker": {"type": ["string", "null"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["ticker", "limit"], "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "get_strategy_performance", "description": "Summarize performance by strategy.", "parameters": {"type": "object", "properties": {"strategy_name": {"type": ["string", "null"]}}, "required": ["strategy_name"], "additionalProperties": False}, "strict": True},
+]
+
+def run_assistant_tool(name: str, arguments: dict, user_id: int):
+    tool_map = {
+        "search_products": lambda: search_products_tool(**arguments),
+        "get_product": lambda: get_product_tool(**arguments),
+        "check_inventory": lambda: check_inventory_tool(**arguments),
+        "add_to_cart": lambda: add_to_cart_tool(user_id=user_id, **arguments),
+        "remove_from_cart": lambda: remove_from_cart_tool(user_id=user_id, **arguments),
+        "get_cart": lambda: get_cart_tool(user_id),
+        "get_sales_summary": get_sales_summary_tool,
+        "get_top_products": lambda: get_top_products_tool(**arguments),
+        "get_regional_sales": get_regional_sales_tool,
+        "get_backtest_results": lambda: get_backtest_results_tool(**arguments),
+        "get_strategy_performance": lambda: get_strategy_performance_tool(**arguments),
+    }
+    if name not in tool_map:
+        return {"error": f"Unknown tool: {name}"}
+    return tool_map[name]()
+
+def openrouter_tools():
+    tools = []
+    for tool in ASSISTANT_TOOLS:
+        function = {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+        }
+        tools.append({"type": "function", "function": function})
+    return tools
+
+def chat_response_message(response: dict) -> dict:
+    choices = response.get("choices") or []
+    if not choices:
+        return {}
+    return choices[0].get("message") or {}
+
+def chat_response_text(response: dict) -> str:
+    content = chat_response_message(response).get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in ("text", "output_text"):
+                parts.append(item.get("text", ""))
+        return "\n".join(part for part in parts if part).strip()
+    return ""
+
+def openrouter_chat_create(payload: dict):
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("LLM_API_KEY")
+    if not api_key:
+        return None
+    payload.setdefault("max_tokens", int(os.getenv("OPENROUTER_MAX_TOKENS") or "900"))
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    referer = os.getenv("OPENROUTER_SITE_URL") or os.getenv("APP_URL")
+    app_title = os.getenv("OPENROUTER_APP_TITLE") or "Enterprise Intelligence Platform"
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if app_title:
+        headers["X-OpenRouter-Title"] = app_title
+    request = urllib.request.Request(
+        OPENROUTER_BASE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"OpenRouter API error: {detail[:500]}")
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"OpenRouter network error: {exc.reason}")
+
+def fallback_tool_chat(question: str, user_id: int):
+    q = question.lower()
+    sources = []
+    if "cart" in q and "add" not in q and "remove" not in q:
+        result = get_cart_tool(user_id)
+        sources.append({"tool_name": "get_cart", "result": result})
+        if not result["items"]:
+            return "Your cart is currently empty.", sources
+        lines = [f"- {item['name']} x{item['quantity']}: ${item['line_total']:,.2f}" for item in result["items"]]
+        return "### Your cart\n\n" + "\n".join(lines) + f"\n\n**Total:** ${result['total']:,.2f}", sources
+    if "regional" in q or "region" in q:
+        result = get_regional_sales_tool()
+        sources.append({"tool_name": "get_regional_sales", "result": result})
+        lines = [f"- {row['region']}: ${row['revenue']:,.0f} from {row['transaction_count']} orders" for row in result]
+        return "### Regional sales\n\n" + ("\n".join(lines) or "No regional sales data found."), sources
+    if "sales" in q or "revenue" in q:
+        result = get_sales_summary_tool()
+        sources.append({"tool_name": "get_sales_summary", "result": result})
+        return f"### Sales summary\n\nTotal revenue is **${result['total_revenue']:,.0f}** across **{result['total_orders']:,}** orders. Average order value is **${result['avg_order_value']:,.2f}**.", sources
+    if "backtest" in q or "strategy" in q:
+        result = get_strategy_performance_tool(None)
+        sources.append({"tool_name": "get_strategy_performance", "result": result})
+        if not result:
+            return "No stored backtest results yet. Run a backtest from the Backtesting module and I can summarize strategy performance here.", sources
+        lines = [f"- {row['strategy_name']}: avg return {row['avg_return']:.2f}%, avg Sharpe {row['avg_sharpe']:.2f}" for row in result]
+        return "### Strategy performance\n\n" + "\n".join(lines), sources
+
+    max_price = None
+    for token in q.replace(",", "").split():
+        if token.replace(".", "", 1).isdigit():
+            max_price = float(token)
+    category = None
+    for known in ["electronics", "fitness", "home", "fashion", "headphones", "laptop"]:
+        if known in q:
+            category = "Electronics" if known in ("headphones", "laptop") else known.title()
+            break
+    result = search_products_tool(query=question, category=category, max_price=max_price, limit=5)
+    sources.append({"tool_name": "search_products", "result": result})
+    if not result:
+        return "I could not find matching active products in inventory. Try a broader category or a higher budget.", sources
+    lines = [f"- **{p['name']}** ({p['category']}): ${p['price']:,.2f}, {p['inventory_count']} in stock, SKU `{p['sku']}`" for p in result]
+    return "### Product matches\n\n" + "\n".join(lines), sources
+
+def llm_tool_chat(messages: list[dict], user_id: int):
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("LLM_API_KEY")
+    if not api_key:
+        question = messages[-1].get("content", "") if messages else ""
+        reply, sources = fallback_tool_chat(question, user_id)
+        return {"reply": reply, "sources": sources, "mode": "local-tools"}
+
+    model = os.getenv("OPENROUTER_MODEL") or os.getenv("LLM_MODEL") or DEFAULT_OPENROUTER_MODEL
+    prompt_messages = [
+        {
+            "role": message.get("role", "user"),
+            "content": message.get("content", ""),
+        }
+        for message in messages[-12:]
+        if message.get("role") in ("user", "assistant") and message.get("content")
+    ]
+    system_message = {
+        "role": "system",
+        "content": (
+            "You are an enterprise retail assistant. Use only the provided tools for product, cart, "
+            "sales, regional, inventory, and backtest facts. Do not invent database values. "
+            "Never generate SQL. Present useful concise answers with IDs/SKUs when relevant."
+        ),
+    }
+    first = openrouter_chat_create({
+        "model": model,
+        "messages": [system_message] + prompt_messages,
+        "tools": openrouter_tools(),
+        "tool_choice": "auto",
+    })
+    if first is None:
+        question = messages[-1].get("content", "") if messages else ""
+        reply, sources = fallback_tool_chat(question, user_id)
+        return {"reply": reply, "sources": sources, "mode": "local-tools"}
+
+    tool_outputs = []
+    sources = []
+    assistant_message = chat_response_message(first)
+    for item in assistant_message.get("tool_calls") or []:
+        if item.get("type") != "function":
+            continue
+        function = item.get("function") or {}
+        name = function.get("name")
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        result = run_assistant_tool(name, arguments, user_id)
+        sources.append({"tool_name": name, "arguments": arguments, "result": result})
+        tool_outputs.append({
+            "role": "tool",
+            "tool_call_id": item.get("id"),
+            "name": name,
+            "content": json.dumps(result, default=str),
+        })
+
+    if not tool_outputs:
+        return {"reply": chat_response_text(first) or "I could not produce a response.", "sources": [], "mode": "openrouter"}
+
+    second = openrouter_chat_create({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Use the tool outputs to answer the user. Be specific, concise, and transparent about inventory, "
+                    "prices, sales, and backtest facts. Do not mention internal tool mechanics unless helpful."
+                ),
+            },
+            *prompt_messages,
+            assistant_message,
+            *tool_outputs,
+        ],
+    })
+    return {"reply": chat_response_text(second or {}) or "I found data but could not summarize it.", "sources": sources, "mode": "openrouter-tools"}
+
 @app.post("/assistant/chat")
 async def assistant_chat(payload: dict, authorization: str = Header(None)):
-    current_user_from_header(authorization)
-    messages = payload.get("messages") or []
-    question = (messages[-1].get("content") if messages else "").lower()
-    sources = []
-
-    if "alert" in question or "stock" in question:
-        data = await dashboard_alerts()
-        sources.append({"tool_name": "dashboard_alerts", "result": data})
-        reply = "### Smart alerts\n\n" + ("\n".join(f"- **{a['title']}**: {a['recommendation']}" for a in data["alerts"][:5]) or "No active alerts right now.")
-    elif "revenue" in question:
-        data = await datamart_kpis()
-        sources.append({"tool_name": "datamart_kpis", "result": data})
-        reply = f"### Revenue summary\n\nTotal completed revenue is **${data['total_revenue']:,.0f}** across **{data['total_orders']:,}** orders. Average order value is **${data['avg_order_value']:,.2f}**."
-    elif "top product" in question or "products" in question:
-        data = rows("""
-            SELECT p.name AS product_name, p.category,
-                   COALESCE(SUM(t.total_amount) FILTER (WHERE t.status = 'completed'), 0) AS revenue,
-                   COALESCE(SUM(t.quantity) FILTER (WHERE t.status = 'completed'), 0) AS units_sold
-            FROM products p
-            LEFT JOIN transactions t ON t.product_id = p.id
-            WHERE p.is_active = TRUE
-            GROUP BY p.id
-            ORDER BY revenue DESC
-            LIMIT 5
-        """)
-        sources.append({"tool_name": "top_products", "result": data})
-        reply = "### Top products\n\n" + ("\n".join(f"- **{r['product_name']}** ({r['category']}): ${to_float(r['revenue']):,.0f}" for r in data) or "No product sales yet.")
-    elif "backtest" in question:
-        req = BacktestRequest(ticker="AAPL", strategy="ma_crossover", start_date="2023-01-01", end_date="2024-01-01")
-        data = synthetic_backtest(req)
-        sources.append({"tool_name": "backtest_run", "result": data["metrics"]})
-        reply = f"### Backtest result\n\nAAPL Moving Average Crossover returned **{data['metrics']['total_return_pct']}%** with a Sharpe ratio of **{data['metrics']['sharpe_ratio']}**."
-    else:
-        data = await datamart_kpis()
-        sources.append({"tool_name": "dashboard_summary", "result": data})
-        reply = "I can help with revenue, products, inventory alerts, category analytics, and strategy backtests. Your database is connected and the analytics endpoints are live."
-
-    return {"reply": reply, "sources": sources}
+    user = current_user_from_header(authorization)
+    return llm_tool_chat(payload.get("messages") or [], user["id"])
 
 @app.get("/reports/executive")
 async def executive_report(authorization: str = Header(None)):
