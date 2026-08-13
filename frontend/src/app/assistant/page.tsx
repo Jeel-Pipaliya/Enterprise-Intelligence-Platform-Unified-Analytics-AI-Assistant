@@ -1,1 +1,0 @@
-export default function AssistantPage() { return <div>AI Assistant Page Skeleton</div>; }

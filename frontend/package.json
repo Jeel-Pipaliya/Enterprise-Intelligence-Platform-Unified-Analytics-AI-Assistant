@@ -1,33 +1,32 @@
 {
-  "name": "enterprise-intelligence-platform-frontend",
-  "version": "0.1.0",
+  "name": "frontend",
   "private": true,
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "@tanstack/react-query": "^5.0.0",
-    "class-variance-authority": "^0.7.0",
-    "clsx": "^2.1.0",
-    "lucide-react": "^0.300.0",
-    "next": "14.1.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "recharts": "^2.10.0",
-    "tailwind-merge": "^2.2.0",
-    "tailwindcss-animate": "^1.0.7"
+    "@heroicons/react": "^2.2.0",
+    "axios": "^1.19.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.2",
+    "recharts": "^3.10.1",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "autoprefixer": "^10.4.16",
-    "postcss": "^8.4.33",
-    "tailwindcss": "^3.4.1",
-    "typescript": "^5.3.3"
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "autoprefixer": "^10.5.4",
+    "oxlint": "^1.75.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.19",
+    "vite": "^8.2.0"
   }
 }

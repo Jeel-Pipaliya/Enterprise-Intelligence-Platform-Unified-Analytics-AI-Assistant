@@ -1,1 +1,0 @@
-export default function DataPage() { return <div>Data Management Page Skeleton</div>; }
