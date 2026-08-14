@@ -27,8 +27,8 @@ services:
       - key: CORS_ORIGINS
         sync: false
 
-  - type: static
-    name: enterprise-intelligence-frontend
+staticSites:
+  - name: enterprise-intelligence-frontend
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
