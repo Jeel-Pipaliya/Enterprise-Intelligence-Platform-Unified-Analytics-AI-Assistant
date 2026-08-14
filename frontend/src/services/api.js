@@ -1,7 +1,10 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: '/api',
+  // During local development Vite proxies /api to FastAPI. In production,
+  // set VITE_API_URL to the public FastAPI URL (for example,
+  // https://enterprise-api.onrender.com).
+  baseURL: import.meta.env.VITE_API_URL || '/api',
   headers: { 'Content-Type': 'application/json' },
 })
 
