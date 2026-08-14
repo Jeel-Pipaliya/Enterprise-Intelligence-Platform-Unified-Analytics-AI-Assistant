@@ -1,5 +1,11 @@
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.chart import AreaChart, BarChart, DoughnutChart, LineChart, PieChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -21,7 +27,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES") or "1440")
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-20b:free"
+OPENROUTER_MODEL="google/gemma-4-26b-a4b-it"
 
 def load_env_file() -> None:
     env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -1243,25 +1249,365 @@ async def assistant_chat(payload: dict, authorization: str = Header(None)):
     user = current_user_from_header(authorization)
     return llm_tool_chat(payload.get("messages") or [], user["id"])
 
+def _style_header_row(ws, row: int, col_count: int):
+    fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+    font = Font(color="FFFFFF", bold=True)
+    for col in range(1, col_count + 1):
+        cell = ws.cell(row=row, column=col)
+        cell.fill = fill
+        cell.font = font
+        cell.alignment = Alignment(horizontal="center")
+
+
+def _autosize_columns(ws, min_width=12, max_width=40):
+    for col_idx in range(1, ws.max_column + 1):
+        letter = get_column_letter(col_idx)
+        max_len = min_width
+        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
+            value = row[0].value
+            if value is not None:
+                max_len = max(max_len, min(len(str(value)) + 2, max_width))
+        ws.column_dimensions[letter].width = max_len
+
+
+def _add_bar_chart(ws, anchor, title, labels, data, horizontal=False, y_title="", x_title="", height=12, width=18):
+    chart = BarChart()
+    chart.type = "bar" if horizontal else "col"
+    chart.title = title
+    chart.height = height
+    chart.width = width
+    if y_title:
+        chart.y_axis.title = y_title
+    if x_title:
+        chart.x_axis.title = x_title
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(labels)
+    chart.legend = None if horizontal else chart.legend
+    ws.add_chart(chart, anchor)
+
+
+def _add_pie_chart(ws, anchor, title, labels, data, doughnut=False, height=12, width=16):
+    chart = DoughnutChart() if doughnut else PieChart()
+    chart.title = title
+    chart.height = height
+    chart.width = width
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(labels)
+    chart.dataLabels = DataLabelList()
+    chart.dataLabels.showPercent = True
+    chart.dataLabels.showCatName = False
+    ws.add_chart(chart, anchor)
+
+
+def _add_line_chart(ws, anchor, title, labels, data, y_title="", x_title="", height=12, width=20, area=False):
+    chart = AreaChart() if area else LineChart()
+    chart.title = title
+    chart.height = height
+    chart.width = width
+    if y_title:
+        chart.y_axis.title = y_title
+    if x_title:
+        chart.x_axis.title = x_title
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(labels)
+    if not area:
+        chart.smooth = True
+    ws.add_chart(chart, anchor)
+
+
+def generate_executive_excel(
+    user: dict,
+    kpis: dict,
+    categories: list,
+    revenue_trend: list,
+    alerts: dict,
+    top_products: list | None = None,
+    regional_sales: list | None = None,
+    strategy_performance: list | None = None,
+    segments: list | None = None,
+) -> io.BytesIO:
+    top_products = top_products or []
+    regional_sales = regional_sales or []
+    strategy_performance = strategy_performance or []
+    segments = segments or []
+
+    wb = Workbook()
+
+    ws_summary = wb.active
+    ws_summary.title = "Executive Summary"
+    ws_summary["A1"] = "Executive Report"
+    ws_summary["A1"].font = Font(size=18, bold=True, color="1E3A5F")
+    ws_summary["A2"] = f"Generated for {user['full_name']}"
+    ws_summary["A3"] = f"Generated on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+
+    summary_headers = ["Metric", "Value"]
+    ws_summary.append([])
+    ws_summary.append(summary_headers)
+    header_row = ws_summary.max_row
+    _style_header_row(ws_summary, header_row, len(summary_headers))
+
+    summary_rows = [
+        ("Total Revenue", kpis["total_revenue"], "$#,##0"),
+        ("Total Orders", kpis["total_orders"], "#,##0"),
+        ("Average Order Value", kpis["avg_order_value"], "$#,##0.00"),
+        ("Total Customers", kpis["total_customers"], "#,##0"),
+        ("Active Alerts", alerts["summary"]["total"], "#,##0"),
+    ]
+    for label, value, fmt in summary_rows:
+        row_idx = ws_summary.max_row + 1
+        ws_summary.cell(row=row_idx, column=1, value=label)
+        value_cell = ws_summary.cell(row=row_idx, column=2, value=value)
+        value_cell.number_format = fmt
+
+    top_categories = categories[:5]
+    if top_categories:
+        chart_title_row = ws_summary.max_row + 2
+        ws_summary.cell(row=chart_title_row, column=4, value="Top Categories (for chart)")
+        ws_summary.cell(row=chart_title_row, column=4).font = Font(bold=True, color="1E3A5F")
+        chart_start = chart_title_row + 1
+        ws_summary.cell(row=chart_start, column=4, value="Category")
+        ws_summary.cell(row=chart_start, column=5, value="Revenue")
+        for col in (4, 5):
+            cell = ws_summary.cell(row=chart_start, column=col)
+            cell.fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        for offset, item in enumerate(top_categories, start=1):
+            row_idx = chart_start + offset
+            ws_summary.cell(row=row_idx, column=4, value=item["category"])
+            cell = ws_summary.cell(row=row_idx, column=5, value=item["revenue"])
+            cell.number_format = "$#,##0"
+        cat_labels = Reference(ws_summary, min_col=4, min_row=chart_start + 1, max_row=chart_start + len(top_categories))
+        cat_data = Reference(ws_summary, min_col=5, min_row=chart_start, max_row=chart_start + len(top_categories))
+        _add_pie_chart(ws_summary, "D14", "Top 5 Categories by Revenue", cat_labels, cat_data, doughnut=True, height=11, width=14)
+        _add_bar_chart(ws_summary, "J5", "Top 5 Category Revenue", cat_labels, cat_data, y_title="Revenue ($)", height=11, width=16)
+
+    ws_categories = wb.create_sheet("Category Breakdown")
+    cat_headers = ["Category", "Revenue", "Share %"]
+    ws_categories.append(cat_headers)
+    _style_header_row(ws_categories, 1, len(cat_headers))
+    for item in categories:
+        row_idx = ws_categories.max_row + 1
+        ws_categories.cell(row=row_idx, column=1, value=item["category"])
+        revenue_cell = ws_categories.cell(row=row_idx, column=2, value=item["revenue"])
+        revenue_cell.number_format = "$#,##0"
+        share_cell = ws_categories.cell(row=row_idx, column=3, value=item["share_pct"])
+        share_cell.number_format = "0.0"
+
+    if categories:
+        labels = Reference(ws_categories, min_col=1, min_row=2, max_row=1 + len(categories))
+        data = Reference(ws_categories, min_col=2, min_row=1, max_row=1 + len(categories))
+        share_data = Reference(ws_categories, min_col=3, min_row=1, max_row=1 + len(categories))
+        _add_pie_chart(ws_categories, "E2", "Revenue Share by Category", labels, data)
+        _add_bar_chart(ws_categories, "E18", "Revenue by Category", labels, data, y_title="Revenue ($)", x_title="Category")
+        _add_bar_chart(ws_categories, "E34", "Category Share %", labels, share_data, y_title="Share (%)", x_title="Category")
+
+    ws_trend = wb.create_sheet("Revenue Trend")
+    trend_headers = ["Month", "Revenue"]
+    ws_trend.append(trend_headers)
+    _style_header_row(ws_trend, 1, len(trend_headers))
+    for item in revenue_trend:
+        row_idx = ws_trend.max_row + 1
+        ws_trend.cell(row=row_idx, column=1, value=item["date"])
+        revenue_cell = ws_trend.cell(row=row_idx, column=2, value=item["revenue"])
+        revenue_cell.number_format = "$#,##0"
+
+    if revenue_trend:
+        trend_labels = Reference(ws_trend, min_col=1, min_row=2, max_row=1 + len(revenue_trend))
+        trend_data = Reference(ws_trend, min_col=2, min_row=1, max_row=1 + len(revenue_trend))
+        _add_line_chart(ws_trend, "D2", "Monthly Revenue Trend", trend_labels, trend_data, y_title="Revenue ($)", x_title="Month")
+        _add_line_chart(ws_trend, "D18", "Revenue Area Trend", trend_labels, trend_data, y_title="Revenue ($)", x_title="Month", area=True)
+
+    ws_products = wb.create_sheet("Top Products")
+    product_headers = ["Product", "Category", "Units Sold", "Revenue"]
+    ws_products.append(product_headers)
+    _style_header_row(ws_products, 1, len(product_headers))
+    for item in top_products:
+        row_idx = ws_products.max_row + 1
+        ws_products.cell(row=row_idx, column=1, value=item["name"])
+        ws_products.cell(row=row_idx, column=2, value=item.get("category", ""))
+        ws_products.cell(row=row_idx, column=3, value=item.get("units_sold", 0))
+        revenue_cell = ws_products.cell(row=row_idx, column=4, value=item.get("revenue", 0))
+        revenue_cell.number_format = "$#,##0"
+    if not top_products:
+        ws_products.append(["—", "—", 0, 0])
+
+    if top_products:
+        product_labels = Reference(ws_products, min_col=1, min_row=2, max_row=1 + len(top_products))
+        product_revenue = Reference(ws_products, min_col=4, min_row=1, max_row=1 + len(top_products))
+        product_units = Reference(ws_products, min_col=3, min_row=1, max_row=1 + len(top_products))
+        _add_bar_chart(ws_products, "F2", "Top Products by Revenue", product_labels, product_revenue, horizontal=True, x_title="Revenue ($)", height=14, width=18)
+        _add_bar_chart(ws_products, "F20", "Top Products by Units Sold", product_labels, product_units, horizontal=True, x_title="Units", height=14, width=18)
+
+    ws_regions = wb.create_sheet("Regional Sales")
+    region_headers = ["Region", "Orders", "Units Sold", "Revenue"]
+    ws_regions.append(region_headers)
+    _style_header_row(ws_regions, 1, len(region_headers))
+    for item in regional_sales:
+        row_idx = ws_regions.max_row + 1
+        ws_regions.cell(row=row_idx, column=1, value=item["region"])
+        ws_regions.cell(row=row_idx, column=2, value=item.get("transaction_count", 0))
+        ws_regions.cell(row=row_idx, column=3, value=item.get("units_sold", 0))
+        revenue_cell = ws_regions.cell(row=row_idx, column=4, value=item.get("revenue", 0))
+        revenue_cell.number_format = "$#,##0"
+    if not regional_sales:
+        ws_regions.append(["—", 0, 0, 0])
+
+    if regional_sales:
+        region_labels = Reference(ws_regions, min_col=1, min_row=2, max_row=1 + len(regional_sales))
+        region_revenue = Reference(ws_regions, min_col=4, min_row=1, max_row=1 + len(regional_sales))
+        region_orders = Reference(ws_regions, min_col=2, min_row=1, max_row=1 + len(regional_sales))
+        _add_bar_chart(ws_regions, "F2", "Revenue by Region", region_labels, region_revenue, y_title="Revenue ($)", x_title="Region")
+        _add_pie_chart(ws_regions, "F18", "Regional Revenue Share", region_labels, region_revenue, doughnut=True)
+        _add_bar_chart(ws_regions, "F34", "Orders by Region", region_labels, region_orders, y_title="Orders", x_title="Region")
+
+    ws_segments = wb.create_sheet("Customer Segments")
+    segment_headers = ["Segment", "Customers", "Total Revenue", "Avg Spend"]
+    ws_segments.append(segment_headers)
+    _style_header_row(ws_segments, 1, len(segment_headers))
+    for item in segments:
+        row_idx = ws_segments.max_row + 1
+        ws_segments.cell(row=row_idx, column=1, value=item["segment"])
+        ws_segments.cell(row=row_idx, column=2, value=item.get("customer_count", 0))
+        revenue_cell = ws_segments.cell(row=row_idx, column=3, value=item.get("total_revenue", 0))
+        revenue_cell.number_format = "$#,##0"
+        spend_cell = ws_segments.cell(row=row_idx, column=4, value=item.get("avg_spend_per_customer", 0))
+        spend_cell.number_format = "$#,##0.00"
+    if not segments:
+        ws_segments.append(["—", 0, 0, 0])
+
+    if segments:
+        segment_labels = Reference(ws_segments, min_col=1, min_row=2, max_row=1 + len(segments))
+        segment_revenue = Reference(ws_segments, min_col=3, min_row=1, max_row=1 + len(segments))
+        _add_pie_chart(ws_segments, "F2", "Revenue by Segment", segment_labels, segment_revenue)
+        _add_bar_chart(ws_segments, "F18", "Customers by Segment", segment_labels, Reference(ws_segments, min_col=2, min_row=1, max_row=1 + len(segments)), y_title="Customers", x_title="Segment")
+
+    ws_backtest = wb.create_sheet("Strategy Performance")
+    strategy_headers = ["Strategy", "Runs", "Avg Return %", "Avg Sharpe", "Avg Max Drawdown %"]
+    ws_backtest.append(strategy_headers)
+    _style_header_row(ws_backtest, 1, len(strategy_headers))
+    for item in strategy_performance:
+        row_idx = ws_backtest.max_row + 1
+        ws_backtest.cell(row=row_idx, column=1, value=item["strategy_name"])
+        ws_backtest.cell(row=row_idx, column=2, value=item.get("runs", 0))
+        return_cell = ws_backtest.cell(row=row_idx, column=3, value=item.get("avg_return", 0))
+        return_cell.number_format = "0.00"
+        sharpe_cell = ws_backtest.cell(row=row_idx, column=4, value=item.get("avg_sharpe", 0))
+        sharpe_cell.number_format = "0.00"
+        dd_cell = ws_backtest.cell(row=row_idx, column=5, value=item.get("avg_max_drawdown", 0))
+        dd_cell.number_format = "0.00"
+    if not strategy_performance:
+        ws_backtest.append(["—", 0, 0, 0, 0])
+
+    if strategy_performance:
+        strategy_labels = Reference(ws_backtest, min_col=1, min_row=2, max_row=1 + len(strategy_performance))
+        strategy_return = Reference(ws_backtest, min_col=3, min_row=1, max_row=1 + len(strategy_performance))
+        strategy_sharpe = Reference(ws_backtest, min_col=4, min_row=1, max_row=1 + len(strategy_performance))
+        _add_bar_chart(ws_backtest, "G2", "Average Return by Strategy", strategy_labels, strategy_return, y_title="Return (%)", x_title="Strategy")
+        _add_bar_chart(ws_backtest, "G18", "Average Sharpe by Strategy", strategy_labels, strategy_sharpe, y_title="Sharpe Ratio", x_title="Strategy", horizontal=True)
+
+    ws_alerts = wb.create_sheet("Alerts")
+    alert_headers = ["Severity", "Title", "Message", "Recommendation"]
+    ws_alerts.append(alert_headers)
+    _style_header_row(ws_alerts, 1, len(alert_headers))
+    alert_rows = alerts.get("alerts") or []
+    for alert in alert_rows:
+        ws_alerts.append([
+            alert.get("severity", ""),
+            alert.get("title", ""),
+            alert.get("message", ""),
+            alert.get("recommendation", ""),
+        ])
+    if not alert_rows:
+        ws_alerts.append(["—", "No active alerts", "", ""])
+
+    severity_counts = {}
+    for alert in alert_rows:
+        key = (alert.get("severity") or "unknown").title()
+        severity_counts[key] = severity_counts.get(key, 0) + 1
+    if severity_counts:
+        sev_start = ws_alerts.max_row + 2
+        ws_alerts.cell(row=sev_start, column=7, value="Severity")
+        ws_alerts.cell(row=sev_start, column=8, value="Count")
+        for col in (7, 8):
+            cell = ws_alerts.cell(row=sev_start, column=col)
+            cell.fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        for idx, (severity, count) in enumerate(severity_counts.items(), start=1):
+            ws_alerts.cell(row=sev_start + idx, column=7, value=severity)
+            ws_alerts.cell(row=sev_start + idx, column=8, value=count)
+        sev_labels = Reference(ws_alerts, min_col=7, min_row=sev_start + 1, max_row=sev_start + len(severity_counts))
+        sev_data = Reference(ws_alerts, min_col=8, min_row=sev_start, max_row=sev_start + len(severity_counts))
+        chart_row = max(sev_start + len(severity_counts) + 2, 4)
+        _add_pie_chart(ws_alerts, f"G{chart_row}", "Alerts by Severity", sev_labels, sev_data, doughnut=True, height=10, width=14)
+        _add_bar_chart(ws_alerts, f"G{chart_row + 16}", "Alert Count by Severity", sev_labels, sev_data, y_title="Count", x_title="Severity", height=10, width=14)
+
+    ws_dashboard = wb.create_sheet("Visual Dashboard")
+    ws_dashboard["A1"] = "Visual Dashboard"
+    ws_dashboard["A1"].font = Font(size=18, bold=True, color="1E3A5F")
+    ws_dashboard["A2"] = "At-a-glance charts compiled from report data"
+    if categories:
+        dash_labels = Reference(ws_categories, min_col=1, min_row=2, max_row=min(6, 1 + len(categories)))
+        dash_data = Reference(ws_categories, min_col=2, min_row=1, max_row=min(6, 1 + len(categories)))
+        _add_pie_chart(ws_dashboard, "A4", "Category Mix", dash_labels, dash_data, doughnut=True, height=12, width=16)
+    if revenue_trend:
+        dash_trend_labels = Reference(ws_trend, min_col=1, min_row=2, max_row=1 + len(revenue_trend))
+        dash_trend_data = Reference(ws_trend, min_col=2, min_row=1, max_row=1 + len(revenue_trend))
+        _add_line_chart(ws_dashboard, "I4", "Revenue Trend", dash_trend_labels, dash_trend_data, y_title="Revenue ($)", area=True, height=12, width=20)
+    if regional_sales:
+        dash_region_labels = Reference(ws_regions, min_col=1, min_row=2, max_row=1 + len(regional_sales))
+        dash_region_data = Reference(ws_regions, min_col=4, min_row=1, max_row=1 + len(regional_sales))
+        _add_bar_chart(ws_dashboard, "A22", "Regional Revenue", dash_region_labels, dash_region_data, y_title="Revenue ($)", height=12, width=16)
+    if top_products:
+        dash_product_labels = Reference(ws_products, min_col=1, min_row=2, max_row=min(7, 1 + len(top_products)))
+        dash_product_data = Reference(ws_products, min_col=4, min_row=1, max_row=min(7, 1 + len(top_products)))
+        _add_bar_chart(ws_dashboard, "I22", "Top Product Revenue", dash_product_labels, dash_product_data, horizontal=True, x_title="Revenue ($)", height=12, width=20)
+    if strategy_performance:
+        dash_strategy_labels = Reference(ws_backtest, min_col=1, min_row=2, max_row=1 + len(strategy_performance))
+        dash_strategy_data = Reference(ws_backtest, min_col=3, min_row=1, max_row=1 + len(strategy_performance))
+        _add_bar_chart(ws_dashboard, "A40", "Strategy Returns", dash_strategy_labels, dash_strategy_data, y_title="Return (%)", height=12, width=16)
+
+    for sheet in (
+        ws_summary, ws_categories, ws_trend, ws_products, ws_regions,
+        ws_segments, ws_backtest, ws_alerts, ws_dashboard,
+    ):
+        _autosize_columns(sheet)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
 @app.get("/reports/executive")
 async def executive_report(authorization: str = Header(None)):
     user = current_user_from_header(authorization)
     kpis = await datamart_kpis()
     categories = await datamart_category_breakdown()
+    revenue_trend = await datamart_revenue_trend()
     alerts = await dashboard_alerts()
-    content = [
-        "# Executive Report",
-        f"Generated for {user['full_name']}",
-        "",
-        f"- Total revenue: ${kpis['total_revenue']:,.0f}",
-        f"- Total orders: {kpis['total_orders']:,}",
-        f"- Average order value: ${kpis['avg_order_value']:,.2f}",
-        f"- Active alerts: {alerts['summary']['total']}",
-        "",
-        "## Top Categories",
-    ]
-    content.extend(f"- {c['category']}: ${c['revenue']:,.0f} ({c['share_pct']}%)" for c in categories[:5])
-    return {"content": "\n".join(content)}
+    top_products = get_top_products_tool(limit=10)
+    regional_sales = get_regional_sales_tool()
+    strategy_performance = get_strategy_performance_tool(None)
+    segments = await datamart_segments()
+    buffer = generate_executive_excel(
+        user,
+        kpis,
+        categories,
+        revenue_trend,
+        alerts,
+        top_products=top_products,
+        regional_sales=regional_sales,
+        strategy_performance=strategy_performance,
+        segments=segments,
+    )
+    filename = f"executive-report-{datetime.utcnow().strftime('%Y-%m-%d')}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @app.get("/health")
 async def health():
