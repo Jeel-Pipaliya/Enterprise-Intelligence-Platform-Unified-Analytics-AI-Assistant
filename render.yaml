@@ -7,19 +7,28 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /docs
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        sync: false
+        value: postgresql://USER:PASSWORD@HOST:6543/postgres?sslmode=require
+
+      - key: SUPABASE_URL
+        value: https://your-project.supabase.co
+
+      - key: SUPABASE_ANON_KEY
+        value: your_supabase_anon_key
+
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        value: your_supabase_service_role_key
 
       - key: SECRET_KEY
-        sync: false
+        generateValue: true
 
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "1440"
 
       - key: OPENROUTER_API_KEY
-        sync: false
+        value: your_openrouter_api_key
 
       - key: OPENROUTER_MODEL
         value: google/gemma-4-26b-a4b-it
@@ -28,13 +37,16 @@ services:
         value: "900"
 
       - key: OPENROUTER_SITE_URL
-        sync: false
+        value: https://your-vercel-app.vercel.app
 
       - key: OPENROUTER_APP_TITLE
-        value: "Enterprise Intelligence Platform"
+        value: Enterprise Intelligence Platform
 
       - key: CORS_ORIGINS
-        sync: false
+        value: https://your-vercel-app.vercel.app
+
+      - key: LLM_API_KEY
+        value: your_legacy_llm_key_if_needed
 
   # Frontend - React/Vite
   - type: web
@@ -46,4 +58,13 @@ services:
     pullRequestPreviewsEnabled: true
     envVars:
       - key: VITE_API_URL
-        sync: false
+        value: https://your-render-backend-url
+
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        value: https://your-project.supabase.co
+
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        value: your_supabase_anon_key
+
+      - key: NEXT_PUBLIC_API_URL
+        value: https://your-render-backend-url
