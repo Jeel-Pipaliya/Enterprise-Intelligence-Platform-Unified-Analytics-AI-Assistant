@@ -10,25 +10,33 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+
       - key: SECRET_KEY
         sync: false
+
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "1440"
+
       - key: OPENROUTER_API_KEY
         sync: false
+
       - key: OPENROUTER_MODEL
         value: google/gemma-4-26b-a4b-it
+
       - key: OPENROUTER_MAX_TOKENS
         value: "900"
+
       - key: OPENROUTER_SITE_URL
         sync: false
+
       - key: OPENROUTER_APP_TITLE
         value: Enterprise Intelligence Platform
+
       - key: CORS_ORIGINS
         sync: false
 
-type: static
-  - name: enterprise-intelligence-frontend
+  - type: static
+    name: enterprise-intelligence-frontend
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
