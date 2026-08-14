@@ -59,14 +59,6 @@ export default function Login() {
                 </button>
               ))}
             </div>
-            <div className="text-[11px] text-slate-500 space-y-1 font-mono">
-              {Object.values(DEFAULT_CREDENTIALS).map(({ label, email, password }) => (
-                <p key={email}>
-                  <span className="font-sans font-medium text-slate-600">{label}:</span>{' '}
-                  {email} / {password}
-                </p>
-              ))}
-            </div>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
