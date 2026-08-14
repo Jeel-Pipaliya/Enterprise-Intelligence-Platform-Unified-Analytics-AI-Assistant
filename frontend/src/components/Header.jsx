@@ -21,12 +21,14 @@ export default function Header() {
 
   const exportReport = async () => {
     try {
-      const res = await api.get('/reports/executive')
-      const blob = new Blob([res.data.content], { type: 'text/markdown' })
+      const res = await api.get('/reports/executive', { responseType: 'blob' })
+      const blob = new Blob([res.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `executive-report-${new Date().toISOString().slice(0, 10)}.md`
+      a.download = `executive-report-${new Date().toISOString().slice(0, 10)}.xlsx`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {
@@ -52,7 +54,7 @@ export default function Header() {
               🎬 Demo Mode
             </button>
             <button onClick={exportReport} className="btn-secondary text-xs py-1.5 px-3 hidden md:inline-flex">
-              📄 Export Report
+              📊 Export Report
             </button>
           </>
         )}

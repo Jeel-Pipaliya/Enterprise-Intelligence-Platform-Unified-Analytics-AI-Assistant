@@ -51,6 +51,7 @@ function SourcePanel({ sources, expanded, onToggle }) {
 }
 
 export default function AIAssistant() {
+  const isAuthError = (err) => err.response?.status === 401 || err.response?.data?.detail === 'Invalid token'
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -138,6 +139,14 @@ export default function AIAssistant() {
       setMessages(finalMessages)
       await saveConversation(finalMessages, activeConvId)
     } catch (err) {
+      if (isAuthError(err)) {
+        setMessages(m => [...m, {
+          role: 'assistant',
+          content: '**Session expired**\n\nPlease sign in again to keep chatting.',
+          sources: [],
+        }])
+        return
+      }
       setMessages(m => [...m, {
         role: 'assistant',
         content: `**Something went wrong**\n\n${err.response?.data?.detail || err.message}`,
