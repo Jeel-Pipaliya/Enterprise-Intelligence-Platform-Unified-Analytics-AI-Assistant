@@ -1,4 +1,5 @@
 services:
+  # Backend - FastAPI
   - type: web
     name: enterprise-intelligence-backend
     runtime: python
@@ -30,13 +31,15 @@ services:
         sync: false
 
       - key: OPENROUTER_APP_TITLE
-        value: Enterprise Intelligence Platform
+        value: "Enterprise Intelligence Platform"
 
       - key: CORS_ORIGINS
         sync: false
 
-  - type: static
+  # Frontend - React/Vite
+  - type: web
     name: enterprise-intelligence-frontend
+    runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
