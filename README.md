@@ -5,6 +5,18 @@ This project is a unified Enterprise Intelligence Platform built as a modular mo
 2. **DataMart Analytics Module**: Business intelligence analytics module powered by Supabase.
 3. **Retail AI Assistant**: AI Chat agent with functional RAG, comparison, recommendations, and cart tools.
 
+## Default Demo Credentials
+
+These accounts are created automatically when the backend starts (`backend/main.py`). Use them for local development and demos only — change passwords before any production deployment.
+
+| Role | Email | Password |
+|------|-------|----------|
+| Admin | `admin@example.com` | `admin123` |
+| Analyst | `analyst@example.com` | `analyst123` |
+| Customer | `customer@example.com` | `customer123` |
+
+The login page includes quick-fill buttons for each role and displays the same credentials.
+
 ## Technology Stack
 - **Frontend**: React, Vite, Tailwind CSS, Recharts
 - **Backend**: Python, FastAPI, Pydantic, SQLAlchemy

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { DEFAULT_CREDENTIALS } from '../config/defaultCredentials'
 
 export default function Login() {
   const { login } = useAuth()
@@ -22,12 +23,8 @@ export default function Login() {
   }
 
   const fillDemo = (role) => {
-    const creds = {
-      analyst:  { email: 'demo@enterprise.com',     password: 'demo1234' },
-      admin:    { email: 'admin@enterprise.com',    password: 'admin1234' },
-      customer: { email: 'customer@enterprise.com', password: 'customer1234' },
-    }
-    setForm(creds[role])
+    const { email, password } = DEFAULT_CREDENTIALS[role]
+    setForm({ email, password })
   }
 
   return (
@@ -49,16 +46,25 @@ export default function Login() {
 
           {/* Demo quick-fill */}
           <div className="mb-5 bg-slate-50 border border-slate-200 rounded-lg p-3">
-            <p className="text-xs font-semibold text-slate-500 mb-2">Quick Demo Login</p>
-            <div className="flex gap-2 flex-wrap">
-              {['analyst', 'admin', 'customer'].map(role => (
+            <p className="text-xs font-semibold text-slate-500 mb-2">Default Demo Accounts</p>
+            <div className="flex gap-2 flex-wrap mb-3">
+              {Object.entries(DEFAULT_CREDENTIALS).map(([role, { label }]) => (
                 <button
                   key={role}
+                  type="button"
                   onClick={() => fillDemo(role)}
-                  className="text-xs px-2.5 py-1 rounded-md bg-white border border-slate-200 text-slate-600 hover:border-accent-300 hover:text-accent-700 transition-colors capitalize"
+                  className="text-xs px-2.5 py-1 rounded-md bg-white border border-slate-200 text-slate-600 hover:border-accent-300 hover:text-accent-700 transition-colors"
                 >
-                  {role}
+                  {label}
                 </button>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-500 space-y-1 font-mono">
+              {Object.values(DEFAULT_CREDENTIALS).map(({ label, email, password }) => (
+                <p key={email}>
+                  <span className="font-sans font-medium text-slate-600">{label}:</span>{' '}
+                  {email} / {password}
+                </p>
               ))}
             </div>
           </div>

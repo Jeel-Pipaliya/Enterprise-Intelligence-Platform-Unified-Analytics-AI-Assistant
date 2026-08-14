@@ -11,3 +11,15 @@ INFO:     127.0.0.1:60071 - "GET /datamart/revenue-trend HTTP/1.1" 200 OK
 INFO:     127.0.0.1:53997 - "GET /assistant/conversations HTTP/1.1" 200 OK
 INFO:     127.0.0.1:53999 - "GET /assistant/conversations HTTP/1.1" 200 OK
 INFO:     127.0.0.1:61838 - "POST /assistant/chat HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:61987 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62821 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49946 - "GET /dashboard/snapshot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49947 - "GET /datamart/revenue-trend HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63097 - "GET /dashboard/snapshot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59783 - "GET /assistant/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62864 - "GET /datamart/revenue-trend HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56421 - "GET /assistant/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61411 - "POST /assistant/chat HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:52255 - "GET /assistant/conversations/26c88c5e-a98e-49ac-8b23-ed11e51f290a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57218 - "POST /assistant/chat HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:63380 - "POST /assistant/chat HTTP/1.1" 502 Bad Gateway
